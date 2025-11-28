@@ -173,7 +173,8 @@ if __name__ == "__main__":
     if uploaded_files:
         
         # Display the column letters being used for user confirmation
-        st.info(f"Processing {len(uploaded_files)} file(s) using columns: Date: {date_col_str.upper()} (Index: {date_col_index}), Time: {time_col_str.upper()} (Index: {time_col_index}), PSum: {ps_um_col_str.upper()} (Index: {ps_um_col_index}).")
+        # REMOVED 0-based index display here
+        st.info(f"Processing {len(uploaded_files)} file(s) using columns: Date: {date_col_str.upper()}, Time: {time_col_str.upper()}, PSum: {ps_um_col_str.upper()}.")
         
         # 1. Process data
         processed_data_dict = process_uploaded_files(uploaded_files, COLUMNS_TO_EXTRACT, HEADER_ROW_INDEX)
