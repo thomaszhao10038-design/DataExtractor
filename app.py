@@ -186,11 +186,28 @@ if __name__ == "__main__":
             st.dataframe(processed_data_dict[first_sheet_name].head())
             st.success("All selected columns extracted and consolidated successfully!")
             
-            # --- NEW: File Name Customization ---
-            default_filename = "EnergyAnalyser_Consolidated_Data.xlsx"
+            # --- File Name Customization (Updated Logic) ---
+            # Generate a dynamic default filename based on uploaded files
+            file_names_without_ext = [f.name.rsplit('.', 1)[0] for f in uploaded_files]
             
+            if len(file_names_without_ext) > 1:
+                # Use a combined name for multiple files
+                first_name = file_names_without_ext[0]
+                # Keep the default filename manageable
+                if len(first_name) > 20:
+                    first_name = first_name[:17] + "..."
+                    
+                default_filename = f"{first_name}_and_{len(file_names_without_ext) - 1}_More_Consolidated.xlsx"
+            elif file_names_without_ext:
+                # Use the single file name
+                default_filename = f"{file_names_without_ext[0]}_Consolidated.xlsx"
+            else:
+                # Fallback
+                default_filename = "EnergyAnalyser_Consolidated_Data.xlsx"
+
+
             custom_filename = st.text_input(
-                "Customize Output Excel Filename:",
+                "Output Excel Filename:", # Label updated
                 value=default_filename,
                 key="output_filename_input",
                 help="Enter the name for the final Excel file, ensuring it ends with .xlsx"
