@@ -130,8 +130,10 @@ def process_uploaded_files(uploaded_files, columns_config, header_index):
             df_extracted['Date'] = datetime_series.dt.strftime('%d/%m/%Y')
             df_extracted['Time'] = datetime_series.dt.strftime('%H:%M:%S')
             
-            # The columns are now separate: ['Date', 'Time', 'PSum (W)'].
-            
+            # GUARANTEE SEPARATION: Explicitly re-index the DataFrame to ensure the desired column order
+            FINAL_COLUMNS = ['Date', 'Time', PSUM_OUTPUT_NAME]
+            df_extracted = df_extracted[FINAL_COLUMNS]
+
             # 7. Clean the filename for the Excel sheet name
             sheet_name = filename.replace('.csv', '').replace('.', '_').strip()[:31]
             
