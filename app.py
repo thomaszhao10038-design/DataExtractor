@@ -8,33 +8,35 @@ from functools import reduce
 # --- 1. CONFIGURATION AND UTILITIES ---
 
 # Define a broader set of expected and common column names
-# The code will search for these in the uploaded files (case-insensitive search).
+# **Crucially, if the script fails to find a column, check your CSV header and add the EXACT name here.**
 EXPECTED_COLUMNS = {
+    # Add your specific logger headers to these lists if default ones fail (e.g., 'START_DATE')
     'DATE': ['Date', 'date', 'Recording Date', 'Day', 'Log Date'],
     'TIME': ['Time', 'time', 'Recording Time', 'Hour', 'Log Time'],
-    # Prioritize 'Total' or clear 'Active Energy'
+    # Energy (Wh) - Look for total energy import
     'ENERGY_WH': ['Total Active Energy Import(Wh)', 'Active Energy Import(Wh)', 'Energy (Wh)', 'Wh Reading', 'Total Energy'],
-    # Prioritize 'Total' or clear 'Active Power'
+    # Power (W) - Look for average or instantaneous active power
     'POWER_W': ['Total Active Power Demand(W)', 'Active Power(W)', 'Active Power(W) Avg', 'Power (W)', 'Total Power'],
 }
 
 def find_actual_col_name(df, expected_keys):
     """
-    Finds the actual column name in the DataFrame from a list of expected names (case-insensitive).
-    Prioritizes columns that match the expected key order.
+    Finds the actual column name in the DataFrame from a list of expected names (case-insensitive and trimmed).
     """
-    df_cols_lower = {col.lower(): col for col in df.columns}
+    # 1. Normalize DataFrame columns (trim whitespace and lower case)
+    df_cols_map = {col.strip().lower(): col for col in df.columns}
     
-    # Iterate through the expected keys and return the first match
+    # 2. Search for the expected keys
     for key in expected_keys:
-        if key.lower() in df_cols_lower:
-            return df_cols_lower[key.lower()]
+        normalized_key = key.strip().lower()
+        if normalized_key in df_cols_map:
+            return df_cols_map[normalized_key]
     
     return None
 
 def preprocess_and_calculate_daily_kwh(df, msb_name):
     """
-    Step 2.1: Combine Date/Time, calculate daily consumption (kWh), and prepare the load profile.
+    Combines Date/Time, calculates daily consumption (kWh), and prepares the load profile.
     
     Args:
         df (pd.DataFrame): The raw data for a single MSB.
@@ -51,19 +53,24 @@ def preprocess_and_calculate_daily_kwh(df, msb_name):
     wh_col = find_actual_col_name(df, EXPECTED_COLUMNS['ENERGY_WH'])
     w_col = find_actual_col_name(df, EXPECTED_COLUMNS['POWER_W'])
 
-    required_cols = {'Date': date_col, 'Time': time_col, 'Wh Reading': wh_col, 'Power (W)': w_col}
+    required_cols_map = {'Date': date_col, 'Time': time_col, 'Energy (Wh)': wh_col, 'Power (W)': w_col}
     
-    missing_cols = [k for k, v in required_cols.items() if v is None]
+    missing_cols = [k for k, v in required_cols_map.items() if v is None]
     if missing_cols:
-        # Raise a more descriptive error based on what was *actually* missing
-        st.error(f"❌ **Error in {msb_name}:** Missing essential columns. Could not find column names matching: {', '.join(missing_cols)}.")
-        st.warning(f"**Tip:** The script looked for variants of: {EXPECTED_COLUMNS['DATE'][0]} (Date), {EXPECTED_COLUMNS['TIME'][0]} (Time), {EXPECTED_COLUMNS['ENERGY_WH'][0]} (Energy), and {EXPECTED_COLUMNS['POWER_W'][0]} (Power). Please check your file's header row.")
+        # Generate a list of all potential names that were searched for but not found
+        missing_search_terms = []
+        if 'Date' in missing_cols: missing_search_terms.extend(EXPECTED_COLUMNS['DATE'])
+        if 'Time' in missing_cols: missing_search_terms.extend(EXPECTED_COLUMNS['TIME'])
+        
+        st.error(f"❌ **Error in {msb_name}:** Missing essential columns: {', '.join(missing_cols)}.")
+        st.warning(f"**Tip:** The script searched for names like: {', '.join(list(set(missing_search_terms))[:5])}... (and others). Please add the **exact header names** from your CSV file to the `EXPECTED_COLUMNS` dictionary in `app.py`.")
         return None, None
 
     # 2. Combine Date and Time into a single Timestamp
     try:
         # Combine the columns and attempt to convert to datetime.
-        df['Timestamp'] = pd.to_datetime(df[date_col].astype(str) + ' ' + df[time_col].astype(str), errors='coerce', utc=True)
+        df['Timestamp'] = pd.to_datetime(df[date_col].astype(str).str.strip() + ' ' + df[time_col].astype(str).str.strip(), 
+                                         errors='coerce', utc=True)
     except Exception as e:
         st.error(f"❌ **Error in {msb_name}:** Failed to combine '{date_col}' and '{time_col}' into a datetime object. Check data format.")
         return None, None
@@ -72,18 +79,18 @@ def preprocess_and_calculate_daily_kwh(df, msb_name):
     df.dropna(subset=['Timestamp', wh_col, w_col], inplace=True)
     
     if df.empty:
-        st.error(f"**{msb_name}**: No valid data rows after cleaning. Please check for empty or non-numeric energy readings.")
+        st.error(f"**{msb_name}**: No valid data rows after cleaning. Check for empty or non-numeric readings.")
         return None, None
 
     # Sort and set the combined Timestamp as index for time series operations
     df.sort_values('Timestamp', inplace=True)
     df.set_index('Timestamp', inplace=True)
     
-    # Clean up the energy column and convert to numeric (if not already)
+    # Clean up the energy column and convert to numeric
     df[wh_col] = pd.to_numeric(df[wh_col], errors='coerce')
     df[w_col] = pd.to_numeric(df[w_col], errors='coerce')
 
-    # --- Daily Consumption (Step 2.1) ---
+    # --- Daily Consumption Calculation ---
     
     # Group by calendar day (Date)
     df_daily = df.groupby(df.index.date).agg(
@@ -92,21 +99,18 @@ def preprocess_and_calculate_daily_kwh(df, msb_name):
     )
     
     # Calculate Daily Energy Consumption (kWh)
-    # Formula: Daily kWh = (End of Day Wh Reading - Start of Day Wh Reading) / 1000
     daily_consumption_col = f'{msb_name} (kWh)'
     df_daily[daily_consumption_col] = (df_daily['end_wh'] - df_daily['start_wh']) / 1000.0
     
-    # Final cleanup for the daily dataframe: filter out negative/zero consumption (due to meter reset/bad data)
+    # Filter out negative/zero consumption (due to bad data or meter reset)
     df_daily = df_daily[df_daily[daily_consumption_col] > 0] 
     
-    # Finalize index/column names
     df_daily.index.names = ['Date']
     df_daily.reset_index(inplace=True)
     df_daily['Date'] = pd.to_datetime(df_daily['Date'])
 
-    # --- Load Profile Prep (Step 3.3) ---
+    # --- Load Profile Prep ---
     
-    # Prepare dataframe for load profile (instantaneous power)
     df_load_profile = df[[w_col]].copy()
     df_load_profile.rename(columns={w_col: f'{msb_name} (W)'}, inplace=True)
     
@@ -114,43 +118,38 @@ def preprocess_and_calculate_daily_kwh(df, msb_name):
     return df_daily[['Date', daily_consumption_col]], df_load_profile
 
 def create_final_report(daily_dfs):
-    """
-    Step 2.2: Merge daily dataframes and calculate the Total Building Load.
-    """
+    """Merges daily dataframes and calculates the Total Building Load."""
     if not daily_dfs:
         return pd.DataFrame()
 
     # Merge all daily dataframes on the common 'Date' column
     final_df = reduce(lambda left, right: pd.merge(left, right, on='Date', how='inner'), daily_dfs)
     
-    # Ensure all MSB columns exist before calculating the total
+    # Identify MSB columns
     msb_cols = [col for col in final_df.columns if ' (kWh)' in col]
     
     # Calculate Total Building Load
     final_df['Total Building Load (kWh)'] = final_df[msb_cols].sum(axis=1)
     
-    # Format the Date column for the final report display
     final_df['Date'] = final_df['Date'].dt.strftime('%Y-%m-%d')
     
-    # Reorder columns as specified: Date, MSB-1, MSB-2, MSB-3, Total
+    # Reorder columns
     col_order = ['Date'] + msb_cols + ['Total Building Load (kWh)']
     return final_df[col_order]
 
 def calculate_average_load_profile(all_load_dfs):
-    """
-    Step 3.3: Calculate the average hourly power profile.
-    """
+    """Calculates the average hourly power profile."""
     if not all_load_dfs:
         return pd.DataFrame()
 
-    # 1. Combine all instantaneous power data
+    # Combine all instantaneous power data
     df_raw_combined = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), all_load_dfs)
     
-    # 2. Calculate the Total Load
+    # Calculate the Total Load
     power_cols = [col for col in df_raw_combined.columns if ' (W)' in col and 'Total' not in col]
     df_raw_combined['Total Load (W)'] = df_raw_combined[power_cols].sum(axis=1)
     
-    # 3. Calculate Hourly Average
+    # Calculate Hourly Average
     df_raw_combined['Hour'] = df_raw_combined.index.hour
     
     # Group by Hour and calculate the mean for all power columns
@@ -192,14 +191,13 @@ if uploaded_files:
     if len(uploaded_files) != 3:
         st.error("🚨 **Error:** Please upload exactly **three** CSV files (MSB-1, MSB-2, MSB-3) for a complete analysis.")
     else:
-        # Map MSB names to uploaded files
         msb_map = {f'MSB-{i+1}': f for i, f in enumerate(uploaded_files)}
         st.sidebar.success("3 files uploaded. Starting processing...")
         
         # --- Data Ingestion and Processing Loop ---
         for msb_name, file in msb_map.items():
             try:
-                # Read the CSV file. Important: header is on the second row (index 1).
+                # Read the CSV file. Crucially, header is on the second row (index 1).
                 df_raw = pd.read_csv(file, header=1, skipinitialspace=True)
                 
                 if df_raw.empty:
@@ -213,17 +211,16 @@ if uploaded_files:
                     all_load_profiles.append(load_profile_df)
                 
             except Exception as e:
-                # Catch general parsing errors not related to missing columns
-                st.exception(f"An unexpected error occurred while processing {msb_name}: {e}")
+                st.exception(f"An unexpected error occurred while processing {msb_name}. This is usually a file formatting issue: {e}")
 
-        # --- Final Consolidation (Step 2.2) ---
+        # --- Final Consolidation ---
         if len(all_daily_dfs) >= 1:
             final_report_df = create_final_report(all_daily_dfs)
             st.sidebar.success(f"✅ Daily Reports consolidated from {len(all_daily_dfs)} MSB files.")
         else:
-            st.sidebar.error("❌ Failed to process any files. Check error messages above.")
+            st.sidebar.error("❌ Failed to process any files successfully. Check error messages above.")
             
-        # --- Calculate Average Load Profile (Step 3.3) ---
+        # --- Calculate Average Load Profile ---
         avg_load_profile_df = pd.DataFrame()
         if all_load_profiles:
             avg_load_profile_df = calculate_average_load_profile(all_load_profiles)
@@ -234,10 +231,9 @@ if uploaded_files:
 
 if not final_report_df.empty:
     
-    # Create the tab structure for presenting results
     tab1, tab2, tab3 = st.tabs(["📊 Final Report & Download", "📈 Energy Consumption Analysis (kWh)", "⏰ Average Load Profile (W)"])
     
-    # --- TAB 1: Final Data and Download (Section 3.1) ---
+    # --- TAB 1: Final Data and Download ---
     with tab1:
         st.header("Final Consolidated Daily Energy Report")
         st.dataframe(final_report_df, use_container_width=True, height=400)
@@ -254,7 +250,7 @@ if not final_report_df.empty:
             help='Click to download the combined and processed daily energy consumption data.'
         )
 
-    # --- TAB 2: Energy Consumption Analysis (Section 3.2) ---
+    # --- TAB 2: Energy Consumption Analysis ---
     with tab2:
         st.header("Daily Energy Consumption Analysis")
         
@@ -276,7 +272,6 @@ if not final_report_df.empty:
         # Chart 2: Load Apportionment Over Time (Stacked Area Chart)
         st.subheader("MSB Load Apportionment Over Time")
         
-        # Melt the dataframe for Plotly
         msb_cols = [col for col in final_report_df.columns if 'MSB-' in col]
         df_melted = final_report_df[['Date'] + msb_cols].melt(
             id_vars='Date', 
@@ -299,20 +294,18 @@ if not final_report_df.empty:
         )
         st.plotly_chart(fig_stacked, use_container_width=True)
 
-    # --- TAB 3: Average Load Profile (Section 3.3) ---
+    # --- TAB 3: Average Load Profile ---
     with tab3:
         st.header("24-Hour Average Load Profile (W)")
         
         if not avg_load_profile_df.empty:
             
-            # Melt the dataframe for Plotly
             df_profile_melted = avg_load_profile_df.melt(
                 id_vars='Hour of Day',
                 var_name='Load Source',
                 value_name='Average Active Power (W)'
             )
             
-            # Use Plotly Express for the line chart
             fig_profile = px.line(
                 df_profile_melted,
                 x='Hour of Day',
