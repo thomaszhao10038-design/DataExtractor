@@ -1,147 +1,147 @@
 import streamlit as st
 import pandas as pd
-import openpyxl
-from datetime import datetime, timedelta
-from io import BytesIO
-import openpyxl.utils
+import numpy as np
 
-# Excel base date (Windows Excel treats 1900 as leap year → use 1899-12-30)
-EXCEL_BASE = datetime(1899, 12, 30)
+# --- Configuration ---
+# Based on the file snippets for 'final document.xlsx - MSB X.csv', the files seem to 
+# have complex headers that repeat. We will try a simplified approach by targeting 
+# the power column directly, assuming the file format is consistent.
+# For the MSB X.csv files, the actual column names appear in the first row.
+HEADER_ROW_INDEX = 0 
+# Required columns based on the file snippets for MSB 1, 2, 3:
+REQUIRED_TIME_COLUMN = 'Local Time Stamp'
+REQUIRED_POWER_COLUMN = 'Active Power (W)'
+REQUIRED_COLUMNS = [REQUIRED_TIME_COLUMN, REQUIRED_POWER_COLUMN]
 
-def excel_date_serial(dt):
-    delta = dt - EXCEL_BASE
-    return delta.days + (delta.seconds / 86400.0)
-
-def time_to_fraction(t):
-    if pd.isna(t) or not isinstance(t, str):
-        return 0.0
-    parts = str(t).strip().split(':')
-    if len(parts) < 3:
-        return 0.0
+def find_first_occurrence(df, column_name):
+    """
+    Finds the index of the first occurrence of a column name,
+    which is necessary when the CSV has duplicate column headers.
+    """
+    cols = df.columns.tolist()
     try:
-        h, m, s = map(int, parts[:3])
-        return h/24 + m/1440 + s/86400
-    except:
-        return 0.0
+        # Find the index of the first occurrence of the column name
+        index = cols.index(column_name)
+        return df.columns[index]
+    except ValueError:
+        return None
 
-def process_raw_csv(file):
-    df = pd.read_csv(file, skiprows=2, low_memory=False)
-    df['Datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'],
-                                  format='%d/%m/%Y %H:%M:%S',
-                                  errors='coerce',
-                                  dayfirst=True)
-    df = df.dropna(subset=['Datetime']).copy()
-    df['Day_Serial'] = df['Datetime'].apply(lambda x: int(excel_date_serial(x)))
-    df['Local_Time_Stamp'] = df['Time'].apply(time_to_fraction)
-    df['Active_Power_W'] = pd.to_numeric(df['PSum'], errors='coerce').fillna(0)
-    df['kW'] = -df['Active_Power_W'] / 1000
-    return df
+def process_msb_data(file_path, msb_name):
+    """
+    Reads and processes the MSB raw data files.
+    This function is corrected to use column names and the appropriate header index.
+    """
+    st.write(f"--- Processing {msb_name} Data ---")
+    
+    try:
+        # Use header=HEADER_ROW_INDEX (0) to correctly set the column names 
+        # based on the row that starts with 'UTC Offset (minutes), Local Time Stamp, Active Power (W)...'.
+        # Since the columns are repeated, we will load the whole file and select by index.
+        df_raw = pd.read_csv(file_path, header=HEADER_ROW_INDEX)
+        
+        # --- Column Selection (Handling Duplicate Columns) ---
+        
+        # Find the first 'Local Time Stamp' column (it's the second column in the row 0 header)
+        time_col_name = df_raw.columns[1]
+        
+        # Find the first 'Active Power (W)' column (it's the third column in the row 0 header)
+        power_col_name = df_raw.columns[2]
 
-# =============================================
-st.set_page_config(page_title="EnergyAnalyser", layout="centered")
-st.title("EnergyAnalyser")
-st.markdown("Upload the three raw CSV files (MSB 1, MSB 2, MSB 3) → get **final_document.xlsx**")
+        if not (time_col_name == REQUIRED_TIME_COLUMN and power_col_name == REQUIRED_POWER_COLUMN):
+            st.error(f"Error for {msb_name}: Expected columns '{REQUIRED_TIME_COLUMN}' (Col 1) and '{REQUIRED_POWER_COLUMN}' (Col 2) not found at expected positions.")
+            st.warning(f"Columns found at [1] and [2]: {time_col_name}, {power_col_name}")
+            return None
+        
+        # Select the necessary columns by index 1 and 2 to grab the first occurrence of Time and Power
+        df = df_raw.iloc[:, [1, 2]].copy()
+        
+        # Apply the required column names for consistency
+        df.columns = [REQUIRED_TIME_COLUMN, REQUIRED_POWER_COLUMN]
+        
+        # Drop the first row which contains the initial timestamp in the header data
+        df = df.iloc[1:].copy()
+        
+        # Rename and process
+        df.rename(columns={REQUIRED_POWER_COLUMN: 'Power (W)', REQUIRED_TIME_COLUMN: 'Timestamp'}, inplace=True)
+        
+        # Convert power from W to kW
+        # Also convert column to numeric, as it may be read as string due to missing values
+        df['Power (W)'] = pd.to_numeric(df['Power (W)'], errors='coerce')
+        df['Power (kW)'] = df['Power (W)'] / 1000.0
+        
+        # Remove negative power values (likely export/measurement error for simple load analysis)
+        df['Power (kW)'] = df['Power (kW)'].clip(lower=0) 
+        
+        st.success(f"Successfully loaded and processed {msb_name}. Rows: {len(df)}")
+        st.dataframe(df.head())
+        
+        return df.dropna(subset=['Power (kW)', 'Timestamp'])
 
-msb1 = st.file_uploader("Raw data MSB 1.csv", type="csv")
-msb2 = st.file_uploader("Raw data MSB 2.csv", type="csv")
-msb3 = st.file_uploader("Raw data MSB 3.csv", type="csv")
+    except FileNotFoundError:
+        st.error(f"File not found for {msb_name} at path: {file_path}")
+        return None
+    except Exception as e:
+        # Catch any other unexpected error and report it clearly
+        st.error(f"An unexpected error occurred while processing {msb_name}: {e}")
+        st.info("This often happens when the file structure is highly complex or inconsistent.")
+        return None
 
-if st.button("Generate Excel") and msb1 and msb2 and msb3:
-    with st.spinner("Processing… (10–30 seconds)"):
-        df1 = process_raw_csv(msb1)
-        df2 = process_raw_csv(msb2)
-        df3 = process_raw_csv(msb3)
+def main():
+    """Main Streamlit application logic."""
+    st.set_page_config(layout="wide", page_title="Energy Data Analyser (MSB)")
+    st.title("Energy Data Analyser (MSB)")
+    st.markdown("Load and analyze raw energy data from MSB devices.")
 
-        daily1 = df1.groupby('Day_Serial')['kW'].mean().round(6)
-        daily2 = df2.groupby('Day_Serial')['kW'].mean().round(6)
-        daily3 = df3.groupby('Day_Serial')['kW'].mean().round(6)
-        all_days = sorted({*daily1.index, *daily2.index, *daily3.index})
+    # --- File Paths (Updated to the structure of the newer, raw-looking MSB files) ---
+    msb_files = {
+        'MSB-1': 'final document.xlsx - MSB 1.csv',
+        'MSB-2': 'final document.xlsx - MSB 2.csv',
+        'MSB-3': 'final document.xlsx - MSB 3.csv',
+    }
+    
+    # --- Data Processing and Visualization ---
+    
+    all_dfs = {}
+    
+    for msb_name, file_path in msb_files.items():
+        df = process_msb_data(file_path, msb_name)
+        if df is not None:
+            all_dfs[msb_name] = df
+            
+    if all_dfs:
+        st.header("Combined Power Overview (kW)")
+        st.markdown("This chart shows the total active power demand for each MSB over time.")
 
-        output = BytesIO()
-        wb = openpyxl.Workbook()
+        combined_data = pd.DataFrame()
+        
+        # Plotting the data if processing was successful
+        for msb_name, df in all_dfs.items():
+            if 'Power (kW)' in df.columns and 'Timestamp' in df.columns:
+                # Set Timestamp as index and add MSB name as column header
+                df_plot = df.set_index('Timestamp')['Power (kW)'].rename(msb_name)
+                combined_data = pd.concat([combined_data, df_plot], axis=1)
 
-        def write_msb_sheet(name, df):
-            ws = wb.create_sheet(title=name)
-            days = sorted(df['Day_Serial'].unique())
-            col = 2
-            for i, day in enumerate(days):
-                block = df[df['Day_Serial'] == day].sort_values('Local_Time_Stamp')
-                ws.cell(1, col,   "Local Time Stamp")
-                ws.cell(1, col+1, "Active Power (W)")
-                ws.cell(1, col+2, "kW")
-                ws.cell(1, col+3, "")
-                if i > 0:
-                    ws.cell(2, col, day)
-                for r, row in enumerate(block.itertuples(), start=2):
-                    ws.cell(r, col,   round(row.Local_Time_Stamp, 11))
-                    ws.cell(r, col+1, row.Active_Power_W)
-                    ws.cell(r, col+2, row.kW)
-                    ws.cell(r, col+3, "")
-                col += 4
-            if days:
-                ws['A1'] = "UTC Offset (minutes)"
-                ws['A2'] = days[0]
+        if not combined_data.empty:
+            # We are not dropping NaNs here to preserve data points where one MSB 
+            # might have a value while others don't, but the line chart handles this.
+            
+            st.line_chart(combined_data)
+            
+            # --- Aggregated Metrics ---
+            total_load = combined_data.sum(axis=1)
+            total_load_summary = {
+                'Total Peak Demand (kW)': total_load.max(),
+                'Average Load (kW)': total_load.mean(),
+                'Total Energy (kWh)': total_load.sum() / (60 / 5) # Assuming 5-minute intervals (12 data points per hour)
+            }
+            
+            st.subheader("Aggregated Metrics")
+            st.dataframe(pd.DataFrame(total_load_summary, index=['Value']))
 
-        write_msb_sheet("MSB 1", df1)
-        write_msb_sheet("MSB 2", df2)
-        write_msb_sheet("MSB 3", df3)
-
-        # Total MSB sheet
-        ws_total = wb.create_sheet("Total MSB")
-        for c, h in enumerate(["Date","MSB-1","MSB-2","MSB-3","Total Building Load"], 1):
-            ws_total.cell(1, c, h)
-        for i, day in enumerate(all_days, 2):
-            k1 = daily1.get(day, 0)
-            k2 = daily2.get(day, 0)
-            k3 = daily3.get(day, 0)
-            ws_total.cell(i,1, day)
-            ws_total.cell(i,2, k1)
-            ws_total.cell(i,3, k2)
-            ws_total.cell(i,4, k3)
-            ws_total.cell(i,5, k1+k2+k3)
-
-        # Load Apportioning (Marelli)
-        ws_load = wb.create_sheet("Load Apportioning (Marelli)")
-        headers = ["Date","Day","MSB No. 2","MSB No. 3","MSB No. 4","MSB No. 5",
-                   "MSB No. 6","MSB No. 7","EMSB","Maximum Demand, kW"]
-        for c, h in enumerate(headers, 1):
-            ws_load.cell(1, c, h)
-
-        row = 3
-        for day in all_days:
-            dt = EXCEL_BASE + timedelta(days=day)
-            k1 = daily1.get(day, 0)
-            k2 = daily2.get(day, 0)
-            k3 = daily3.get(day, 0)
-            ws_load.cell(row,1, day)
-            ws_load.cell(row,2, dt.strftime("%A"))
-            ws_load.cell(row,3, k1)
-            ws_load.cell(row,4, k2)
-            ws_load.cell(row,5, k3)
-            ws_load.cell(row,10, round(k1+k2+k3, 5))
-            row += 1
-
-        last = row - 1
-        ws_load.cell(row,2,"Average")
-        for c in range(3,11):
-            letter = openpyxl.utils.get_column_letter(c)
-            ws_load.cell(row,c,f"=AVERAGE({letter}3:{letter}{last})")
-        row += 1
-        ws_load.cell(row,2,"Total")
-        for c in range(3,11):
-            letter = openpyxl.utils.get_column_letter(c)
-            ws_load.cell(row,c,f"=SUM({letter}3:{letter}{last})")
-
-        wb.remove(wb["Sheet"])
-        wb.save(output)
-        output.seek(0)
-
-    st.success("Done!")
-    st.download_button(
-        label="Download final_document.xlsx",
-        data=output.getvalue(),
-        file_name="final_document.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-else:
-    st.info("Upload all three raw CSV files → click **Generate Excel**")
+            st.subheader("Data Summary (First 500 rows)")
+            st.dataframe(combined_data.head(500))
+        else:
+            st.info("No common timestamp data available to combine and display.")
+            
+if __name__ == "__main__":
+    main()
