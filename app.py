@@ -1,184 +1,140 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
 import openpyxl
+from datetime import datetime, timedelta
 from io import BytesIO
 
-# Function to compute Excel date serial
-def excel_date_serial(dt):
-    base = datetime(1899, 12, 30)
-    return (dt - base).days
+# Excel base date for serial numbers
+EXCEL_BASE = datetime(1899, 12, 30)
 
-# Function to compute local time stamp (fractional day)
-def local_time_fraction(time_str):
-    h, m, s = map(int, time_str.split(':'))
-    return (h / 24) + (m / 1440) + (s / 86400)
+def excel_serial(dt):
+    return (dt - EXCEL_BASE).days + (dt.hour*3600 + dt.minute*60 + dt.second)/86400
 
-# Function to process a single CSV and return daily data
-def process_csv(df_csv):
-    df_csv['Datetime'] = pd.to_datetime(df_csv['Date'] + ' ' + df_csv['Time'])
-    df_csv['Day_Serial'] = df_csv['Datetime'].apply(excel_date_serial)
-    df_csv['Local_Time_Stamp'] = df_csv['Time'].apply(local_time_fraction)
-    df_csv['Active_Power'] = df_csv['PSum']  # Assuming 'PSum' column from raw data
-    df_csv['kW'] = -df_csv['Active_Power'] / 1000
-    # Group by day
-    daily_groups = df_csv.groupby('Day_Serial')
-    daily_dfs = {}
-    for day_serial, group in daily_groups:
-        group = group.sort_values('Local_Time_Stamp')
-        daily_dfs[day_serial] = group[['Local_Time_Stamp', 'Active_Power', 'kW']]
-    return daily_dfs, df_csv.groupby('Day_Serial')['kW'].agg(['mean', 'max', 'sum']).reset_index()
+def time_fraction(t):
+    h, m, s = map(int, t.split(':'))
+    return h/24 + m/1440 + s/86400
 
-# Function to build MSB sheet in wide format
-def build_msb_sheet(ws, daily_dfs, msb_name):
-    # Headers
-    ws.cell(row=1, column=1, value="UTC Offset (minutes)")
-    col = 2
-    days = sorted(daily_dfs.keys())
-    max_entries = max(len(daily_dfs[day]) for day in days) if days else 0
-    for day in days:
-        ws.cell(row=1, column=col, value="Local Time Stamp")
-        ws.cell(row=1, column=col+1, value="Active Power (W)")
-        ws.cell(row=1, column=col+2, value="kW")
-        ws.cell(row=1, column=col+3, value="")  # Empty
-        col += 4
-    # Data
-    if days:
-        ws.cell(row=2, column=1, value=days[0])  # First day serial in A2
-    for r in range(max_entries + 1):  # +1 for potential header row shift
-        col = 2
-        for i, day in enumerate(days):
-            if r == 0:
-                # First data row: day serial in Local Time Stamp if not first block
-                if i > 0:
-                    ws.cell(row=2 + r, column=col, value=day)
-            if r < len(daily_dfs[day]):
-                entry = daily_dfs[day].iloc[r]
-                ws.cell(row=2 + r, column=col, value=entry['Local_Time_Stamp'])
-                ws.cell(row=2 + r, column=col+1, value=entry['Active_Power'])
-                ws.cell(row=2 + r, column=col+2, value=entry['kW'])
-                ws.cell(row=2 + r, column=col+3, value="")  # Empty
-            col += 4
+def process_raw_csv(file):
+    df = pd.read_csv(file, skiprows=2, low_memory=False)
+    df['Datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], dayfirst=True)
+    df['Day_Serial'] = df['Datetime'].dt.date.apply(lambda x: excel_serial(datetime.combine(x, datetime.min.time())))
+    df['Local_Time'] = df['Time'].apply(time_fraction)
+    df['kW'] = -df['PSum'].astype(float) / 1000
+    df['Power_W'] = df['PSum'].astype(float)
+    return df
 
-# Function to build Total MSB sheet
-def build_total_sheet(ws, daily_summaries):
-    ws.cell(row=1, column=1, value="Date")
-    ws.cell(row=1, column=2, value="MSB-1")
-    ws.cell(row=1, column=3, value="MSB-2")
-    ws.cell(row=1, column=4, value="MSB-3")
-    ws.cell(row=1, column=5, value="Total Building Load")
-    row = 2
-    days = sorted(set(daily_summaries[0]['Day_Serial']) | set(daily_summaries[1]['Day_Serial']) | set(daily_summaries[2]['Day_Serial']))
-    for day in days:
-        kws = [summ[summ['Day_Serial'] == day]['mean'].values[0] if day in summ['Day_Serial'].values else 0 for summ in daily_summaries]
-        total = sum(kws)
-        ws.cell(row=row, column=1, value=day)
-        ws.cell(row=row, column=2, value=kws[0])
-        ws.cell(row=row, column=3, value=kws[1])
-        ws.cell(row=row, column=4, value=kws[2])
-        ws.cell(row=row, column=5, value=total)
+# -------------------------------------------------
+st.set_page_config(page_title="EnergyAnalyser", layout="wide")
+st.title("EnergyAnalyser – Raw MSB → Final Excel")
+st.markdown("Upload the three raw CSV files (MSB 1, MSB 2, MSB 3) → get the exact **final document.xlsx** format")
+
+msb1_file = st.file_uploader("Raw data MSB 1.csv", type="csv")
+msb2_file = st.file_uploader("Raw data MSB 2.csv", type="csv")
+msb3_file = st.file_uploader("Raw data MSB 3.csv", type="csv")
+
+if msb1_file and msb2_file and msb3_file:
+    with st.spinner("Processing files..."):
+        df1 = process_raw_csv(msb1_file)
+        df2 = process_raw_csv(msb2_file)
+        df3 = process_raw_csv(msb3_file)
+
+        # Daily summaries for Total & Load Apportioning sheets
+        daily1 = df1.groupby('Day_Serial')['kW'].mean().reset_index()
+        daily2 = df2.groupby('Day_Serial')['kW'].mean().reset_index()
+        daily3 = df3.groupby('Day_Serial')['kW'].mean().reset_index()
+        max_daily = (daily1['kW'] + daily2['kW'] + daily3['kW']).max()
+
+        # Create Excel in memory
+        output = BytesIO()
+        wb = openpyxl.Workbook()
+
+        # Helper to write one MSB sheet
+        def write_msb_sheet(name, df):
+            ws = wb.create_sheet(title=name)
+            days = sorted(df['Day_Serial'].unique())
+            col = 2
+            for i, day in enumerate(days):
+                day_data = df[df['Day_Serial'] == day].sort_values('Local_Time')
+                # Header row
+                ws.cell(1, col,   "Local Time Stamp")
+                ws.cell(1, col+1, "Active Power (W)")
+                ws.cell(1, col+2, "kW")
+                ws.cell(1, col+3, "")
+                # Day serial in first data row of this block
+                ws.cell(2, col, day if i > 0 else "")
+                # Data
+                for r, row in enumerate(day_data.itertuples(), start=2):
+                    ws.cell(r, col,   row.Local_Time)
+                    ws.cell(r, col+1, row.Power_W)
+                    ws.cell(r, col+2, row.kW)
+                    ws.cell(r, col+3, "")
+                col += 4
+            # UTC Offset column
+            if days:
+                ws['A2'] = days[0]
+
+        write_msb_sheet("MSB 1", df1)
+        write_msb_sheet("MSB 2", df2)
+        write_msb_sheet("MSB 3", df3)
+
+        # Total MSB sheet
+        ws_total = wb.create_sheet("Total MSB")
+        ws_total['A1'] = "Date"
+        ws_total['B1'] = "MSB-1"
+        ws_total['C1'] = "MSB-2"
+        ws_total['D1'] = "MSB-3"
+        ws_total['E1'] = "Total Building Load"
+        all_days = sorted(set(daily1['Day_Serial']) | set(daily2['Day_Serial']) | set(daily3['Day_Serial']))
+        for i, day in enumerate(all_days, 2):
+            k1 = daily1.loc[daily1['Day_Serial']==day, 'kW'].iloc[0] if day in daily1['Day_Serial'].values else 0
+            k2 = daily2.loc[daily2['Day_Serial']==day, 'kW'].iloc[0] if day in daily2['Day_Serial'].values else 0
+            k3 = daily3.loc[daily3['Day_Serial']==day, 'kW'].iloc[0] if day in daily3['Day_Serial'].values else 0
+            ws_total.cell(i,1, day)
+            ws_total.cell(i,2, round(k1, 5))
+            ws_total.cell(i,3, round(k2, 5))
+            ws_total.cell(i,4, round(k3, 5))
+            ws_total.cell(i,5, round(k1+k2+k3, 5))
+
+        # Load Apportioning sheet (matches your sample layout & formulas)
+        ws_load = wb.create_sheet("Load Apportioning (Marelli)")
+        headers = ["Date","Day","MSB No. 2","MSB No. 3","MSB No. 4","MSB No. 5","MSB No. 6","MSB No. 7","EMSB","Maximum Demand, kW"]
+        for c, h in enumerate(headers, 1):
+            ws_load.cell(1, c, h)
+
+        row = 3
+        for day in all_days:
+            dt = datetime(1899,12,30) + timedelta(days=int(day))
+            k1 = daily1.loc[daily1['Day_Serial']==day, 'kW'].iloc[0] if day in daily1['Day_Serial'].values else 0
+            k2 = daily2.loc[daily2['Day_Serial']==day, 'kW'].iloc[0] if day in daily2['Day_Serial'].values else 0
+            k3 = daily3.loc[daily3['Day_Serial']==day, 'kW'].iloc[0] if day in daily3['Day_Serial'].values else 0
+            ws_load.cell(row,1, day)
+            ws_load.cell(row,2, dt.strftime("%A"))
+            ws_load.cell(row,3, round(k1, 5))   # MSB No. 2 = MSB1 average
+            ws_load.cell(row,4, round(k2, 5))   # MSB No. 3 = MSB2
+            ws_load.cell(row,5, round(k3, 5))   # MSB No. 4 = MSB3
+            ws_load.cell(row,10, round(max_daily, 5))
+            row += 1
+
+        # Averages & Totals (Excel formulas)
+        last_data_row = row - 1
+        ws_load.cell(row, 2, "Average")
+        for c in range(3, 10):
+            ws_load.cell(row, c, f"=AVERAGE({openpyxl.utils.get_column_letter(c)}3:{openpyxl.utils.get_column_letter(c)}{last_data_row})")
         row += 1
+        ws_load.cell(row, 2, "Total")
+        for c in range(3, 10):
+            ws_load.cell(row, c, f"=SUM({openpyxl.utils.get_column_letter(c)}3:{openpyxl.utils.get_column_letter(c)}{last_data_row})")
 
-# Function to build Load Apportioning sheet (inferred calculations)
-def build_load_sheet(ws, daily_summaries):
-    # Sample data from your example; adapt as needed
-    ws.cell(row=1, column=1, value="Date")
-    ws.cell(row=1, column=2, value="Day")
-    ws.cell(row=1, column=3, value="MSB No. 2")
-    ws.cell(row=1, column=4, value="MSB No. 3")
-    ws.cell(row=1, column=5, value="MSB No. 4")
-    ws.cell(row=1, column=6, value="MSB No. 5")
-    ws.cell(row=1, column=7, value="MSB No. 6")
-    ws.cell(row=1, column=8, value="MSB No. 7")
-    ws.cell(row=1, column=9, value="EMSB")
-    ws.cell(row=1, column=10, value="Maximum Demand, kW")
-    row = 3  # Skip row2 as empty in sample
-    days = sorted(set(daily_summaries[0]['Day_Serial']) | set(daily_summaries[1]['Day_Serial']) | set(daily_summaries[2]['Day_Serial']))
-    for i, day in enumerate(days):
-        dt = datetime(1899, 12, 30) + timedelta(days=day)
-        day_name = dt.strftime('%A')
-        kws_avg = [summ[summ['Day_Serial'] == day]['mean'].values[0] if day in summ['Day_Serial'].values else 0 for summ in daily_summaries]
-        max_demand = max(summ[summ['Day_Serial'] == day]['max'].values[0] if day in summ['Day_Serial'].values else 0 for summ in daily_summaries)
-        ws.cell(row=row, column=1, value=day)
-        ws.cell(row=row, column=2, value=day_name)
-        ws.cell(row=row, column=3, value=kws_avg[0])  # MSB1 as No. 2
-        ws.cell(row=row, column=4, value=kws_avg[1])  # MSB2 as No. 3
-        ws.cell(row=row, column=5, value=kws_avg[2])  # MSB3 as No. 4
-        ws.cell(row=row, column=6, value=0)  # Placeholder for No. 5-7
-        ws.cell(row=row, column=7, value=0)
-        ws.cell(row=row, column=8, value=0)
-        ws.cell(row=row, column=9, value=0)  # EMSB placeholder
-        ws.cell(row=row, column=10, value=max_demand)
-        row += 1
-    # Averages, totals, etc.
-    ws.cell(row=row, column=2, value="Average")
-    for col in range(3, 10):
-        ws.cell(row=row, column=col, value=f"=AVERAGE(C3:C{row-1})")  # Formula for average
-    row += 1
-    ws.cell(row=row, column=2, value="Total")
-    for col in range(3, 10):
-        ws.cell(row=row, column=col, value=f"=SUM(C3:C{row-2})")
-    # Add estimated losses, BEII, etc. (using sample values; adjust formulas/area assumptions)
-    row += 2
-    ws.cell(row=row, column=1, value="Total Estimated Losses, kW")
-    ws.cell(row=row, column=14, value=6.71)  # Sample
-    row += 1
-    ws.cell(row=row, column=1, value="Building Energy Intensity Index (BEII)")
-    # Assume areas: Main Wing 10000 sqm, North 5000, Overall 15000 - replace with real
-    total_energy = sum(daily_summaries[i]['sum'].sum() for i in range(3)) / 24  # kWh approximate
-    ws.cell(row=row, column=18, value=total_energy / 10000)  # Main Wing
-    ws.cell(row=row, column=19, value=total_energy / 5000)  # North Wing
-    ws.cell(row=row, column=20, value=total_energy / 15000)  # Overall
-    # Add LEII, ACEII, etc. similarly with sample formulas
-    row += 1
-    ws.cell(row=row, column=1, value="Lighting Energy Intensity Index (LEII)")
-    ws.cell(row=row, column=18, value=6.00)  # Sample
-    ws.cell(row=row, column=19, value=12.10)
-    ws.cell(row=row, column=20, value=8.12)
-    # Continue for other sections (AMD Office, etc.) using similar logic/sample data
+        # Remove default sheet
+        wb.remove(wb["Sheet"])
 
-# Streamlit App
-st.title("Energy Analyser Grok")
-st.markdown("Upload raw CSV files for MSB 1, 2, 3 to generate the final Excel.")
+        wb.save(output)
+        output.seek(0)
 
-uploaded_msb1 = st.file_uploader("Raw Data MSB 1.csv", type="csv")
-uploaded_msb2 = st.file_uploader("Raw Data MSB 2.csv", type="csv")
-uploaded_msb3 = st.file_uploader("Raw Data MSB 3.csv", type="csv")
-
-if uploaded_msb1 and uploaded_msb2 and uploaded_msb3:
-    df_msb1 = pd.read_csv(uploaded_msb1, skiprows=2)  # Skip header rows in raw CSV
-    df_msb2 = pd.read_csv(uploaded_msb2, skiprows=2)
-    df_msb3 = pd.read_csv(uploaded_msb3, skiprows=2)
-    
-    daily_dfs1, summary1 = process_csv(df_msb1)
-    daily_dfs2, summary2 = process_csv(df_msb2)
-    daily_dfs3, summary3 = process_csv(df_msb3)
-    
-    # Create Excel
-    output = BytesIO()
-    wb = openpyxl.Workbook()
-    # MSB 1 sheet
-    ws1 = wb.create_sheet("MSB 1")
-    build_msb_sheet(ws1, daily_dfs1, "MSB 1")
-    # MSB 2
-    ws2 = wb.create_sheet("MSB 2")
-    build_msb_sheet(ws2, daily_dfs2, "MSB 2")
-    # MSB 3
-    ws3 = wb.create_sheet("MSB 3")
-    build_msb_sheet(ws3, daily_dfs3, "MSB 3")
-    # Total MSB
-    ws_total = wb.create_sheet("Total MSB")
-    build_total_sheet(ws_total, [summary1, summary2, summary3])
-    # Load Apportioning
-    ws_load = wb.create_sheet("Load Apportioning (Marelli)")
-    build_load_sheet(ws_load, [summary1, summary2, summary3])
-    # Remove default sheet
-    wb.remove(wb['Sheet'])
-    wb.save(output)
-    
+    st.success("Processing complete!")
     st.download_button(
-        label="Download Final Excel",
-        data=output.getvalue(),
+        label="Download final_document.xlsx",
+        data=output,
         file_name="final_document.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
