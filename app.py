@@ -147,6 +147,7 @@ def resample_10min_modulus(processed_data_dict):
     resampled_data = {}
     
     for sheet_name, df in processed_data_dict.items():
+        # Ensure the PSum column is numeric and exists
         if PSUM_OUTPUT_NAME in df.columns:
             # 1. Calculate modulus (absolute value)
             df[RESAMPLED_PSUM_NAME] = df[PSUM_OUTPUT_NAME].abs()
@@ -159,6 +160,7 @@ def resample_10min_modulus(processed_data_dict):
             df_resampled = df_resampled.dropna()
             
             resampled_data[sheet_name] = df_resampled
+        # Note: We skip files where PSum wasn't found or wasn't numeric after cleaning
             
     return resampled_data
 
@@ -189,7 +191,7 @@ if __name__ == "__main__":
         time_col_index = excel_col_to_index(time_col_str)
         ps_um_col_index = excel_col_to_index(ps_um_col_str)
         
-        # Define the columns to extract, using 'PSum (W)' as the output name
+        # Define the columns to extract, using the constants
         COLUMNS_TO_EXTRACT = {
             date_col_index: 'Date',
             time_col_index: 'Time',
@@ -233,7 +235,7 @@ if __name__ == "__main__":
             st.dataframe(processed_data_dict[first_sheet_name].head())
             st.success("Selected columns extracted and consolidated successfully!")
             
-            # File Name Customization
+            # File Name Customization for raw data
             file_names_without_ext = [f.name.rsplit('.', 1)[0] for f in uploaded_files]
             
             if len(file_names_without_ext) > 1:
@@ -280,6 +282,7 @@ if __name__ == "__main__":
                 st.success("Data successfully resampled to 10-minute absolute mean!")
                 
                 # File Name Customization for resampled data
+                # Use the raw filename base but adjust the suffix
                 default_filename_resampled = default_filename_raw.replace("_Consolidated.xlsx", "_10min_Modulus.xlsx")
                 default_filename_resampled = default_filename_resampled.replace("_More_Consolidated.xlsx", "_More_10min_Modulus.xlsx")
 
@@ -304,7 +307,7 @@ if __name__ == "__main__":
                 )
                 
             else:
-                st.warning("Could not resample data. Check if PSum (W) column contains valid numeric data.")
+                st.warning("Could not resample data. Check if PSum (W) column contains valid numeric data after initial processing.")
 
         else:
             st.error("No data could be successfully processed. Please review the error messages above and adjust the column letters if necessary.")
