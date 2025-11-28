@@ -186,6 +186,16 @@ if __name__ == "__main__":
             st.dataframe(processed_data_dict[first_sheet_name].head())
             st.success("All selected columns extracted and consolidated successfully!")
             
+            # --- NEW: File Name Customization ---
+            default_filename = "EnergyAnalyser_Consolidated_Data.xlsx"
+            
+            custom_filename = st.text_input(
+                "Customize Output Excel Filename:",
+                value=default_filename,
+                key="output_filename_input",
+                help="Enter the name for the final Excel file, ensuring it ends with .xlsx"
+            )
+            
             # 2. Generate Excel file
             excel_data = to_excel(processed_data_dict)
             
@@ -193,7 +203,7 @@ if __name__ == "__main__":
             st.download_button(
                 label="📥 Download Consolidated Data as Excel",
                 data=excel_data,
-                file_name="EnergyAnalyser_Consolidated_Data.xlsx",
+                file_name=custom_filename, # Use the customized filename
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 help="Click to download the Excel file with one sheet per uploaded CSV file."
             )
