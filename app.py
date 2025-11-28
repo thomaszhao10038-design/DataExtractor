@@ -57,13 +57,12 @@ def preprocess_and_calculate_daily_kwh(df, msb_name):
     
     missing_cols = [k for k, v in required_cols_map.items() if v is None]
     if missing_cols:
-        # Generate a list of all potential names that were searched for but not found
         missing_search_terms = []
         if 'Date' in missing_cols: missing_search_terms.extend(EXPECTED_COLUMNS['DATE'])
         if 'Time' in missing_cols: missing_search_terms.extend(EXPECTED_COLUMNS['TIME'])
         
         st.error(f"❌ **Error in {msb_name}:** Missing essential columns: {', '.join(missing_cols)}.")
-        st.warning(f"**Tip:** The script searched for names like: {', '.join(list(set(missing_search_terms))[:5])}... (and others). Please add the **exact header names** from your CSV file to the `EXPECTED_COLUMNS` dictionary in `app.py`.")
+        st.warning(f"**Tip:** The script searched for names like: {', '.join(list(set(missing_search_terms))[:5])}... (and others). If your data's header row is not the 3rd row, please check the `pd.read_csv` call in `app.py`.")
         return None, None
 
     # 2. Combine Date and Time into a single Timestamp
@@ -197,11 +196,15 @@ if uploaded_files:
         # --- Data Ingestion and Processing Loop ---
         for msb_name, file in msb_map.items():
             try:
-                # Read the CSV file. Crucially, header is on the second row (index 1).
-                df_raw = pd.read_csv(file, header=1, skipinitialspace=True)
+                # Based on user feedback: attempting to read the header from the 3rd row (index 2).
+                # This handles two lines of metadata above the actual column names.
+                df_raw = pd.read_csv(file, header=2, skipinitialspace=True)
+                
+                # IMPORTANT FIX: Strip all column names immediately to prevent whitespace issues
+                df_raw.columns = df_raw.columns.str.strip()
                 
                 if df_raw.empty:
-                    st.error(f"**{msb_name}** file is empty or the header on row 2 is incorrect.")
+                    st.error(f"**{msb_name}** file is empty or the header on row 3 is incorrect.")
                     continue
                 
                 daily_df, load_profile_df = preprocess_and_calculate_daily_kwh(df_raw, msb_name)
