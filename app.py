@@ -32,8 +32,6 @@ def excel_col_to_index(col_str):
 st.title("⚡ EnergyAnalyser: Data Consolidation")
 st.markdown("""
     Upload your raw energy data CSV files (up to 10) to extract **Date**, **Time**, and **PSum** and consolidate them into a single Excel file.
-    
-    The application uses the third row (index 2) of the CSV file as the main column header.
 """)
 
 # --- Constants for Data Processing ---
@@ -45,94 +43,54 @@ DATE_FORMAT_MAP = {
     "YYYY-MM-DD": "%Y-%m-%d %H:%M:%S"
 }
 
-# --- User Configuration Section (Sidebar) ---
-st.sidebar.header("⚙️ Column Configuration")
-st.sidebar.markdown("Define the column letter for each data field.")
-
-# Get user-defined column letters (A, B, C...)
-date_col_str = st.sidebar.text_input(
-    "Date Column Letter (Default: A)", 
-    value='A', 
-    key='date_col_str'
-)
-
-time_col_str = st.sidebar.text_input(
-    "Time Column Letter (Default: B)", 
-    value='B', 
-    key='time_col_str'
-)
-
-ps_um_col_str = st.sidebar.text_input(
-    "PSum Column Letter (Default: BI)", 
-    value='BI', 
-    key='psum_col_str',
-    help="PSum (Total Active Power) is expected in Excel column BI. Adjust if needed."
-)
-
-# --- New Configuration for Data Reading ---
-st.sidebar.header("📄 CSV File Settings")
-
-# New input for CSV Delimiter
-delimiter_input = st.sidebar.text_input(
-    "CSV Delimiter (Separator)",
-    value=',',
-    key='delimiter_input',
-    help="The character used to separate values in your CSV file (e.g., ',', ';', or '\\t' for tab)."
-)
-
-start_row_num = st.sidebar.number_input(
-    "Data reading starts from (Row Number)",
-    min_value=1,
-    value=3, 
-    key='start_row_num',
-    help="The row number in the CSV file that contains the column headers (e.g., 'Date', 'Time', 'UA'). The default is Row 3." 
-)
-
-selected_date_format = st.sidebar.selectbox(
-    "Date Format for Parsing",
-    options=["DD/MM/YYYY", "YYYY-MM-DD"],
-    index=0, # Default to DD/MM/YYYY
-    key='selected_date_format',
-    help="Select the format used for the Date column in your CSV file."
-)
-
 # --- Function to Process Data ---
-def process_uploaded_files(uploaded_files, columns_config, header_index, date_format_string, separator):
+def process_uploaded_files(uploaded_files, file_configs):
     """
     Reads multiple CSV files, extracts configured columns, cleans PSum data, 
-    and returns a dictionary of DataFrames.
-    
-    Accepts the 0-based header index, datetime format string, and the separator.
+    and returns a dictionary of DataFrames based on individual file configurations.
     """
     processed_data = {}
     
-    # Ensure all required columns are unique
-    if len(set(columns_config.keys())) != 3:
-        st.error("Error: Date, Time, and PSum must be extracted from three unique column indices.")
-        return {}
-
-    col_indices = list(columns_config.keys())
-    
-    
-    for uploaded_file in uploaded_files:
+    for i, uploaded_file in enumerate(uploaded_files):
         filename = uploaded_file.name
+        config = file_configs[i] # Get the specific configuration for this file
         
         try:
-            # 1. Read the CSV using the specified header row (header_index is 0-based)
-            # --- USE USER-DEFINED SEPARATOR HERE ---
+            # Convert user-defined column letters to 0-based indices
+            date_col_index = excel_col_to_index(config['date_col_str'])
+            time_col_index = excel_col_to_index(config['time_col_str'])
+            ps_um_col_index = excel_col_to_index(config['psum_col_str'])
+            
+            # Define the columns to extract for this file
+            columns_to_extract = {
+                date_col_index: 'Date',
+                time_col_index: 'Time',
+                ps_um_col_index: PSUM_OUTPUT_NAME
+            }
+            col_indices = list(columns_to_extract.keys())
+            
+            # Check for unique indices
+            if len(set(col_indices)) != 3:
+                st.error(f"Error for file **{filename}**: Date, Time, and PSum must be extracted from three unique column indices. Check columns {config['date_col_str']}, {config['time_col_str']}, {config['psum_col_str']}.")
+                continue
+                
+            header_index = int(config['start_row_num']) - 1 # 0-based index for Pandas header argument
+            date_format_string = DATE_FORMAT_MAP.get(config['selected_date_format'])
+            separator = config['delimiter_input']
+            
+            # 1. Read the CSV using the specified settings
             df_full = pd.read_csv(
                 uploaded_file, 
                 header=header_index, 
                 encoding='ISO-8859-1', 
                 low_memory=False,
-                sep=separator # Use the selected separator
+                sep=separator # Use the file's selected separator
             )
             
             # 2. Check if DataFrame has enough columns
             max_index = max(col_indices)
             if df_full.shape[1] < max_index + 1:
-                 # Inform the user that the file likely didn't parse correctly (common delimiter issue)
-                 st.error(f"File **{filename}** failed to read data correctly. It only has {df_full.shape[1]} columns. This usually means the **CSV Delimiter** ('{separator}') is incorrect. Please try changing the separator in the sidebar (e.g., to ';' or '\\t').")
+                 st.error(f"File **{filename}** failed to read data correctly. It only has {df_full.shape[1]} columns. This usually means the **CSV Delimiter** ('{separator}') is incorrect for this file.")
                  continue
 
             # 3. Extract only the required columns by their index (iloc)
@@ -140,7 +98,7 @@ def process_uploaded_files(uploaded_files, columns_config, header_index, date_fo
             
             # 4. Rename the columns to the final names for output
             temp_cols = {
-                columns_config[k]: v for k, v in COLUMNS_TO_EXTRACT.items()
+                k: v for k, v in columns_to_extract.items()
             }
             df_extracted.columns = temp_cols.values()
             
@@ -152,20 +110,18 @@ def process_uploaded_files(uploaded_files, columns_config, header_index, date_fo
                 )
 
             # 6. Format Date and Time columns separately after parsing for correction
-            # Combine the two raw columns ('Date' and 'Time') from the CSV for reliable datetime parsing.
             combined_dt_str = df_extracted['Date'].astype(str) + ' ' + df_extracted['Time'].astype(str)
 
             datetime_series = pd.to_datetime(
                 combined_dt_str, 
                 errors='coerce',
-                # Use the selected date format string for parsing
                 format=date_format_string 
             )
             
             # --- CHECK: Verify successful datetime parsing ---
             valid_dates_count = datetime_series.count()
             if valid_dates_count == 0:
-                st.warning(f"File **{filename}**: No valid dates could be parsed. Check your 'Date Format for Parsing' setting (**{selected_date_format}**) and ensure the 'Date' and 'Time' columns ({date_col_str.upper()} and {time_col_str.upper()}) contain valid data starting from Row {start_row_num}.")
+                st.warning(f"File **{filename}**: No valid dates could be parsed. Check the 'Date Format for Parsing' setting (**{config['selected_date_format']}**) and ensure the 'Date' and 'Time' columns contain valid data starting from Row {config['start_row_num']}.")
                 continue
             # ---------------------------------------------------
 
@@ -182,6 +138,9 @@ def process_uploaded_files(uploaded_files, columns_config, header_index, date_fo
             # Use the new, explicitly constructed DataFrame for the output
             processed_data[sheet_name] = df_final
             
+        except ValueError as e:
+            st.error(f"Configuration Error for file **{filename}**: Invalid column letter entered: {e}. Please use valid Excel column notation (e.g., A, C, AA).")
+            continue
         except Exception as e:
             # Catch all other unexpected exceptions
             st.error(f"Error processing file **{filename}**. An unexpected error occurred. Error: {e}")
@@ -238,30 +197,7 @@ def to_excel(data_dict):
 # --- Main Streamlit Logic ---
 if __name__ == "__main__":
     
-    # Try to convert column letters to 0-based indices
-    try:
-        date_col_index = excel_col_to_index(date_col_str)
-        time_col_index = excel_col_to_index(time_col_str)
-        ps_um_col_index = excel_col_to_index(ps_um_col_str)
-        
-        # Define the columns to extract
-        COLUMNS_TO_EXTRACT = {
-            date_col_index: 'Date',
-            time_col_index: 'Time',
-            ps_um_col_index: PSUM_OUTPUT_NAME
-        }
-        
-    except ValueError as e:
-        st.error(f"Configuration Error: Invalid column letter entered: {e}. Please use valid Excel column notation (e.g., A, C, AA).")
-        st.stop()
-    
-    # 0-based index for Pandas header argument (Row Number - 1)
-    header_row_index = int(start_row_num) - 1
-    
-    # Get the precise format string for parsing datetime objects
-    date_format_string = DATE_FORMAT_MAP.get(selected_date_format)
-
-    # File Uploader
+    # File Uploader is in the main area now
     uploaded_files = st.file_uploader(
         "Choose up to 10 CSV files", 
         type=["csv"], 
@@ -273,65 +209,129 @@ if __name__ == "__main__":
         st.warning(f"You have uploaded {len(uploaded_files)} files. Only the first 10 will be processed.")
         uploaded_files = uploaded_files[:10]
 
-    # Processing and Download Button
+    # Dynamic Configuration Section (appears only after files are uploaded)
     if uploaded_files:
+        st.header("Individual File Configuration")
+        st.warning("Please verify the Delimiter, Start Row, and Column Letters for each file below. Files with different delimiters must be configured separately.")
         
-        # Display the column letters and settings being used for user confirmation
-        st.info(f"The following **GLOBAL SETTINGS** are being applied to all {len(uploaded_files)} file(s): Columns: Date: {date_col_str.upper()}, Time: {time_col_str.upper()}, PSum: {ps_um_col_str.upper()}. Reading starts from **Row {start_row_num}** using **{selected_date_format}** format and delimiter **'{delimiter_input}'**.")
-        
-        # 1. Process data 
-        processed_data_dict = process_uploaded_files(
-            uploaded_files, 
-            COLUMNS_TO_EXTRACT, 
-            header_row_index, 
-            date_format_string,
-            delimiter_input # Pass the new configuration
-        )
-        
-        if processed_data_dict:
-            
-            # --- CONSOLIDATED RAW DATA SECTION ---
-            st.header("Consolidated Raw Data Output")
-            
-            # Display a preview of the first processed file
-            first_sheet_name = next(iter(processed_data_dict))
-            st.subheader(f"Preview of: {first_sheet_name}")
-            # Show a preview with the now separate Date and Time columns
-            st.dataframe(processed_data_dict[first_sheet_name].head())
-            st.success("Selected columns extracted and consolidated successfully!")
+        file_configs = []
+        all_configs_valid = True
 
-            # --- File Name Customization ---
-            file_names_without_ext = [f.name.rsplit('.', 1)[0] for f in uploaded_files]
+        for i, uploaded_file in enumerate(uploaded_files):
+            # Use a Streamlit expander for a cleaner interface for multiple files
+            with st.expander(f"⚙️ Settings for **{uploaded_file.name}**", expanded=i == 0):
+                
+                # --- COLUMN CONFIGURATION (for this file) ---
+                st.subheader("Column Letters")
+                date_col_str = st.text_input(
+                    "Date Column Letter", 
+                    value='A', 
+                    key=f'date_col_str_{i}'
+                )
+
+                time_col_str = st.text_input(
+                    "Time Column Letter", 
+                    value='B', 
+                    key=f'time_col_str_{i}'
+                )
+
+                ps_um_col_str = st.text_input(
+                    "PSum Column Letter", 
+                    value='BI', 
+                    key=f'psum_col_str_{i}',
+                    help="PSum (Total Active Power) column letter in this file (e.g., 'BI')."
+                )
+
+                # --- CSV FILE SETTINGS (for this file) ---
+                st.subheader("CSV File Parsing")
+                delimiter_input = st.text_input(
+                    "CSV Delimiter (Separator)",
+                    value=',',
+                    key=f'delimiter_input_{i}',
+                    help="The character used to separate values (e.g., ',', ';', or '\\t')."
+                )
+
+                start_row_num = st.number_input(
+                    "Header Row Number",
+                    min_value=1,
+                    value=3, 
+                    key=f'start_row_num_{i}',
+                    help="The row number that contains the column headers (e.g., 'Date', 'Time', 'UA')." 
+                )
+
+                selected_date_format = st.selectbox(
+                    "Date Format for Parsing",
+                    options=["DD/MM/YYYY", "YYYY-MM-DD"],
+                    index=0, 
+                    key=f'selected_date_format_{i}',
+                    help="The date format in this file's Date column."
+                )
+                
+                # Store the configuration dictionary for this file
+                config = {
+                    'date_col_str': date_col_str,
+                    'time_col_str': time_col_str,
+                    'psum_col_str': ps_um_col_str,
+                    'delimiter_input': delimiter_input,
+                    'start_row_num': start_row_num,
+                    'selected_date_format': selected_date_format,
+                }
+                file_configs.append(config)
+                
+        # --- Processing and Download Button ---
+        if st.button("🚀 Process All Files"):
             
-            if len(file_names_without_ext) > 1:
-                first_name = file_names_without_ext[0]
-                if len(first_name) > 20:
-                    first_name = first_name[:17] + "..."
-                default_filename = f"{first_name}_and_{len(file_names_without_ext) - 1}_More_Consolidated.xlsx"
-            elif file_names_without_ext:
-                default_filename = f"{file_names_without_ext[0]}_Consolidated.xlsx"
+            # 1. Process data 
+            processed_data_dict = process_uploaded_files(
+                uploaded_files, 
+                file_configs
+            )
+            
+            if processed_data_dict:
+                
+                # --- CONSOLIDATED RAW DATA SECTION ---
+                st.header("Consolidated Raw Data Output")
+                
+                # Display a preview of the first processed file
+                first_sheet_name = next(iter(processed_data_dict))
+                st.subheader(f"Preview of: {first_sheet_name}")
+                st.dataframe(processed_data_dict[first_sheet_name].head())
+                st.success(f"Successfully processed {len(processed_data_dict)} of {len(uploaded_files)} file(s).")
+
+                # --- File Name Customization ---
+                file_names_without_ext = [f.name.rsplit('.', 1)[0] for f in uploaded_files]
+                
+                if len(file_names_without_ext) > 1:
+                    first_name = file_names_without_ext[0]
+                    if len(first_name) > 20:
+                        first_name = first_name[:17] + "..."
+                    default_filename = f"{first_name}_and_{len(file_names_without_ext) - 1}_More_Consolidated.xlsx"
+                elif file_names_without_ext:
+                    default_filename = f"{file_names_without_ext[0]}_Consolidated.xlsx"
+                else:
+                    default_filename = "EnergyAnalyser_Consolidated_Data.xlsx"
+
+
+                custom_filename = st.text_input(
+                    "Output Excel Filename:",
+                    value=default_filename,
+                    key="output_filename_input_raw",
+                    help="Enter the name for the final Excel file with raw extracted data."
+                )
+                
+                # Generate Excel file for raw data
+                excel_data = to_excel(processed_data_dict)
+                
+                # Download Button for raw data
+                st.download_button(
+                    label="📥 Download Consolidated Data (Date, Time, PSum)",
+                    data=excel_data,
+                    file_name=custom_filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    help="Click to download the Excel file with one sheet per uploaded CSV file."
+                )
+
             else:
-                default_filename = "EnergyAnalyser_Consolidated_Data.xlsx"
-
-
-            custom_filename = st.text_input(
-                "Output Excel Filename:",
-                value=default_filename,
-                key="output_filename_input_raw",
-                help="Enter the name for the final Excel file with raw extracted data."
-            )
-            
-            # Generate Excel file for raw data
-            excel_data = to_excel(processed_data_dict)
-            
-            # Download Button for raw data
-            st.download_button(
-                label="📥 Download Consolidated Data (Date, Time, PSum)",
-                data=excel_data,
-                file_name=custom_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help="Click to download the Excel file with one sheet per uploaded CSV file."
-            )
-
-        else:
-            st.error("No data could be successfully processed. Please review the error messages above and adjust the column letters if necessary.")
+                st.error("No data could be successfully processed. Please review the error messages above and adjust the configurations in the file settings.")
+    else:
+        st.sidebar.markdown("Upload files to configure settings.")
