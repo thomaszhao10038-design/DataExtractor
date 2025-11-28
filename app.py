@@ -40,7 +40,7 @@ st.markdown("""
 HEADER_ROW_INDEX = 2 # The 3rd row (Date, Time, UA, UB, etc.)
 
 # --- User Configuration Section (Sidebar) ---
-st.sidebar.header("⚙️ Column Configuration (A, B, C...)")
+st.sidebar.header("⚙️ Column Configuration")
 st.sidebar.markdown("Define the column letter for each data field.")
 
 # Get user-defined column letters (A, B, C...)
@@ -173,7 +173,6 @@ if __name__ == "__main__":
     if uploaded_files:
         
         # Display the column letters being used for user confirmation
-        # REMOVED 0-based index display here
         st.info(f"Processing {len(uploaded_files)} file(s) using columns: Date: {date_col_str.upper()}, Time: {time_col_str.upper()}, PSum: {ps_um_col_str.upper()}.")
         
         # 1. Process data
