@@ -12,66 +12,106 @@ st.set_page_config(
 # --- App Title and Description ---
 st.title("⚡ EnergyAnalyser: Data Consolidation")
 st.markdown("""
-    Upload your raw energy data CSV files (up to 10) to extract **Date**, **Time**, and **PSum** (Total Active Power) 
-    and consolidate them into a single Excel file.
+    Upload your raw energy data CSV files (up to 10) to extract **Date**, **Time**, and **PSum** and consolidate them into a single Excel file.
     
-    The app logic has been updated to:
-    1. **Ensure the 'Time' column (Index 1) is correctly extracted.**
-    2. **Target the correct 'PSum' column (Index 40) based on your file's specific header structure.**
+    The application uses the third row (index 2) of the CSV file as the main column header.
 """)
 
 # --- Constants for Data Processing ---
-# Based on the file structure:
-# skip initial 2 rows, use row 2 (index 2) as header
-HEADER_ROW_INDEX = 2
-# Column indices for the specific data we want (0-based)
-# Corrected PSum index to 40 based on file structure feedback
+HEADER_ROW_INDEX = 2 # The 3rd row (Date, Time, UA, UB, etc.)
+
+# --- User Configuration Section (Sidebar) ---
+st.sidebar.header("⚙️ Column Index Configuration")
+st.sidebar.markdown("Define the column index for each required data field (0-based).")
+
+# Get user-defined indices from the sidebar, with robust defaults
+date_col_index = st.sidebar.number_input(
+    "Date Column Index (Default: 0)", 
+    min_value=0, 
+    value=0, 
+    step=1, 
+    key='date_idx'
+)
+
+time_col_index = st.sidebar.number_input(
+    "Time Column Index (Default: 1)", 
+    min_value=0, 
+    value=1, 
+    step=1, 
+    key='time_idx'
+)
+
+ps_um_col_index = st.sidebar.number_input(
+    "PSum Column Index (Total Active Power) (Default: 40)", 
+    min_value=0, 
+    value=40, 
+    step=1, 
+    key='psum_idx',
+    help="This is the 0-based column index. If the PSum data is in Excel column AO, the index is 40 (A=0, B=1, ... AO=40)."
+)
+
+# Define the columns to extract using the user-configured values
 COLUMNS_TO_EXTRACT = {
-    0: 'Date',     # First column
-    1: 'Time',     # Second column
-    40: 'PSum'     # Corrected index for the 'PSum' column (Total Active Power)
+    date_col_index: 'Date',
+    time_col_index: 'Time',
+    ps_um_col_index: 'PSum'
 }
 
 # --- Function to Process Data ---
-def process_uploaded_files(uploaded_files):
+def process_uploaded_files(uploaded_files, columns_config, header_index):
     """
-    Reads multiple CSV files, extracts Date, Time, and PSum based on fixed indices,
+    Reads multiple CSV files, extracts configured columns, cleans PSum data, 
     and returns a dictionary of DataFrames.
     """
     processed_data = {}
+    
+    # Ensure all required columns are unique
+    if len(set(columns_config.keys())) != 3:
+        st.error("Error: Date, Time, and PSum must be extracted from three unique column indices.")
+        return {}
+
+    col_indices = list(columns_config.keys())
     
     for uploaded_file in uploaded_files:
         filename = uploaded_file.name
         
         try:
             # 1. Read the CSV using the specified header row
-            # header=2 means use the 3rd row (0-indexed) as the column names
-            # skiprows=[0] means skip the very first row (ProductSN...)
+            # header=2: Use the 3rd row as column names
             df_full = pd.read_csv(
                 uploaded_file, 
-                header=HEADER_ROW_INDEX, 
-                skiprows=[0], # Skip the first row (ProductSN)
-                encoding='ISO-8859-1', # Use a robust encoding
-                low_memory=False # Ensures correctness for large files
+                header=header_index, 
+                encoding='ISO-8859-1', 
+                low_memory=False
             )
             
-            # 2. Extract only the required columns by their index (iloc)
-            # This is robust to small changes in header text.
-            col_indices = list(COLUMNS_TO_EXTRACT.keys())
-            df_extracted = df_full.iloc[:, col_indices]
+            # 2. Check if DataFrame has enough columns
+            max_index = max(col_indices)
+            if df_full.shape[1] < max_index + 1:
+                 st.error(f"File **{filename}** has only {df_full.shape[1]} columns, but column index **{max_index}** was requested. Please check the file structure or adjust the indices in the sidebar.")
+                 continue
+
+            # 3. Extract only the required columns by their index (iloc)
+            df_extracted = df_full.iloc[:, col_indices].copy()
             
-            # 3. Rename the columns to the user-specified names
-            df_extracted.columns = COLUMNS_TO_EXTRACT.values()
+            # 4. Rename the columns to the user-specified names
+            df_extracted.columns = columns_config.values()
             
-            # 4. Clean the filename for the Excel sheet name
-            # Max 31 chars for Excel sheet name
+            # 5. Data Cleaning: Convert PSum to numeric, handling potential errors
+            # We assume the user has configured the correct PSum column index
+            if 'PSum' in df_extracted.columns:
+                df_extracted['PSum'] = pd.to_numeric(
+                    df_extracted['PSum'], 
+                    errors='coerce' # Convert non-numeric values to NaN
+                )
+            
+            # 6. Clean the filename for the Excel sheet name
             sheet_name = filename.replace('.csv', '').replace('.', '_').strip()[:31]
             
             processed_data[sheet_name] = df_extracted
             
         except Exception as e:
-            # Display a more informative error message
-            st.error(f"Error processing file {filename}. Ensure it has the expected structure and columns (0, 1, 40). Error: {e}")
+            st.error(f"Error processing file **{filename}**. An unexpected error occurred. Error: {e}")
             continue
             
     return processed_data
@@ -83,7 +123,6 @@ def to_excel(data_dict):
     Takes a dictionary of DataFrames and writes them to an in-memory Excel file.
     """
     output = BytesIO()
-    # Use pandas to write multiple sheets
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         for sheet_name, df in data_dict.items():
             df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -109,10 +148,10 @@ if __name__ == "__main__":
     # Processing and Download Button
     if uploaded_files:
         
-        st.info(f"Processing {len(uploaded_files)} file(s) with fixed indices (Date: 0, Time: 1, PSum: 40)...")
+        st.info(f"Processing {len(uploaded_files)} file(s). Check the sidebar to confirm column indices are set correctly (Date: {date_col_index}, Time: {time_col_index}, PSum: {ps_um_col_index}).")
         
         # 1. Process data
-        processed_data_dict = process_uploaded_files(uploaded_files)
+        processed_data_dict = process_uploaded_files(uploaded_files, COLUMNS_TO_EXTRACT, HEADER_ROW_INDEX)
         
         if processed_data_dict:
             
@@ -120,7 +159,7 @@ if __name__ == "__main__":
             first_sheet_name = next(iter(processed_data_dict))
             st.subheader(f"Preview of: {first_sheet_name}")
             st.dataframe(processed_data_dict[first_sheet_name].head())
-            st.success("All selected columns extracted successfully!")
+            st.success("All selected columns extracted and consolidated successfully!")
             
             # 2. Generate Excel file
             excel_data = to_excel(processed_data_dict)
@@ -135,4 +174,4 @@ if __name__ == "__main__":
             )
             
         else:
-            st.error("No data could be processed. Please check the format of your uploaded CSV files.")
+            st.error("No data could be successfully processed. Please review the error messages above and adjust the column indices if necessary.")
